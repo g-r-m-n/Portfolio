@@ -27,7 +27,7 @@ from tensorflow import keras
 
 
 
-def get_lstm(df1_train, df1_test, x_vars_plus, c = '_Total_', PRINT = 1, LOAD = 1,  output_folder_model = ''):
+def get_lstm(df1_train, df1_test, x_vars_plus, c = '_Total_', PRINT = 1, LOAD = 1,  output_folder_model = '', LOG_TRANSFORM = 0):
     """Run the LSTM model
         LSTM RNN stands for Long Short-Term Memory recurrent neural network 
         LSTM networks use memory blocks - instead of neurons - connected through layers.
@@ -43,7 +43,8 @@ def get_lstm(df1_train, df1_test, x_vars_plus, c = '_Total_', PRINT = 1, LOAD = 
     if PRINT:
         print('\n'+'-'*100)
         print('LSTM RNN model for '+c+'\n')
-
+        if LOG_TRANSFORM:
+            print('\nUsing log-transformation on the response\n')
     # prepare the data
     
     ## lag:
@@ -68,10 +69,14 @@ def get_lstm(df1_train, df1_test, x_vars_plus, c = '_Total_', PRINT = 1, LOAD = 
 
     ## get y and X train
     y_train_s = df1_train_s[:,0]
+    if LOG_TRANSFORM:
+        y_train_s = np.log(y_train_s+1)    
     X_train_s = df1_train_s[:,1:df1_train_s.shape[1]]
 
     ## get y and X test
     y_test_s = df1_test_s[:,0]
+    if LOG_TRANSFORM:
+        y_test_s = np.log(y_test_s+1)
     X_test_s = df1_test_s[:,1:df1_test_s.shape[1]]
 
     ## reshape input to be [samples, time steps, features]
@@ -98,11 +103,14 @@ def get_lstm(df1_train, df1_test, x_vars_plus, c = '_Total_', PRINT = 1, LOAD = 
             # show the model summary:
             print(lstm_model.summary())
 
+        # This callback will stop the training when there is no improvement in the loss for three consecutive epochs.
+        callback = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=3)
+
         # Fit the LSTM
         if PRINT:
             print('\nStart training ...\n')
         # The network is trained a number of epochs, and a batch size of 1 is used.
-        lstm_model.fit(X_train_s, y_train_s,  validation_data=(X_test_s, y_test_s), epochs=100, batch_size=1, verbose=2)
+        lstm_model.fit(X_train_s, y_train_s,  validation_data=(X_test_s, y_test_s), epochs=100, batch_size=1, verbose=2, callbacks=[callback])
 
         # save the trained model
         lstm_model.save(folder_name_trained_model)
@@ -115,7 +123,11 @@ def get_lstm(df1_train, df1_test, x_vars_plus, c = '_Total_', PRINT = 1, LOAD = 
 
     # invert predictions
     trainPredict  = scaler.inverse_transform(np.concatenate((trainPredict_s,df1_train_s[:,1:df1_train_s.shape[1]]),axis=1))[:,0]
-    testPredict   = scaler.inverse_transform(np.concatenate((testPredict_s,df1_test_s[:,1:df1_test_s.shape[1]]),axis=1))[:,0]       
+    testPredict   = scaler.inverse_transform(np.concatenate((testPredict_s,df1_test_s[:,1:df1_test_s.shape[1]]),axis=1))[:,0]     
+
+    if LOG_TRANSFORM:
+        trainPredict = np.exp(trainPredict) - 1
+        testPredict  = np.exp(testPredict)  - 1
 
     return  {'trainPredict':trainPredict, 'testPredict':testPredict, 'y_train':y_train, 'y_test':y_test}
 
