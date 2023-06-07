@@ -91,8 +91,7 @@ def get_lstm(df1_train, df1_test, x_vars_plus, c = '_Total_', PRINT = 1, LOAD = 
         # create and check the LSTM network
         # The network has a visible layer with len(x_vars_plus) input, a hidden layer with 4 LSTM blocks, and an output layer that makes a single value prediction. The default sigmoid activation function is used for the LSTM blocks. 
         lstm_model = Sequential()
-        lstm_model.add(LSTM(2, input_shape=(  look_back, len(x_vars_plus))))
-        lstm_model.add(Dropout(0.5))
+        lstm_model.add(LSTM(1, input_shape=(  look_back, len(x_vars_plus))))
         lstm_model.add(Dense(1))
         lstm_model.compile(loss='mean_squared_error', optimizer='adam')
         if PRINT:
@@ -103,7 +102,7 @@ def get_lstm(df1_train, df1_test, x_vars_plus, c = '_Total_', PRINT = 1, LOAD = 
         if PRINT:
             print('\nStart training ...\n')
         # The network is trained a number of epochs, and a batch size of 1 is used.
-        lstm_model.fit(X_train_s, y_train_s,  validation_data=(X_test_s, y_test_s), epochs=30, batch_size=1, verbose=2)
+        lstm_model.fit(X_train_s, y_train_s,  validation_data=(X_test_s, y_test_s), epochs=100, batch_size=1, verbose=2)
 
         # save the trained model
         lstm_model.save(folder_name_trained_model)
