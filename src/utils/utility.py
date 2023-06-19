@@ -26,8 +26,15 @@ from tensorflow.keras.layers import Dense
 from tensorflow import keras
 
 
+def add_lagged(df1, x_vars, lag = 1):
+    df1 = df1.copy()
+    df_lagged= df1[x_vars+['y_var_lagged']].groupby(level='CCY').shift(lag)
+    df1 = pd.merge(df1, df_lagged ,left_index=True, right_index=True, suffixes=('', '_lagged'+str(lag)))
+        
+    return df1
 
-def get_lstm(df1_train, df1_test, x_vars_plus, c = '_Total_', PRINT = 1, LOAD = 1,  output_folder_model = '', LOG_TRANSFORM = 0):
+
+def get_lstm(df1_train, df1_test, x_vars_plus, x_vars, c = '_Total_', PRINT = 1, LOAD = 1,  output_folder_model = '', LOG_TRANSFORM = 0,    look_back = 1):
     """Run the LSTM model
         LSTM RNN stands for Long Short-Term Memory recurrent neural network 
         LSTM networks use memory blocks - instead of neurons - connected through layers.
@@ -48,24 +55,18 @@ def get_lstm(df1_train, df1_test, x_vars_plus, c = '_Total_', PRINT = 1, LOAD = 
     # prepare the data
     
     ## lag:
-    look_back = 1
     ## normalize the dataset
     ## Reason: LSTMs are sensitive to the scale of the input data, specifically when the sigmoid (default) or tanh activation functions are used.
     scaler = MinMaxScaler(feature_range=(0, 1))
 
     df1_train_c = df1_train.loc[df1_train.index.get_level_values('CCY')==c,['y_var']+x_vars_plus]
-    df1_test_c  = df1_test.loc[ df1_test.index.get_level_values('CCY')==c, ['y_var']+x_vars_plus]
 
     ## get y and X train
     y_train = df1_train_c['y_var'].droplevel('CCY')
 
-    ## get y and X test
-    y_test = df1_test_c['y_var'].droplevel('CCY')
-
     ## scale the data set:
     scaler.fit(df1_train_c)
     df1_train_s = scaler.transform(df1_train_c)
-    df1_test_s  = scaler.transform(df1_test_c)
 
     ## get y and X train
     y_train_s = df1_train_s[:,0]
@@ -73,15 +74,28 @@ def get_lstm(df1_train, df1_test, x_vars_plus, c = '_Total_', PRINT = 1, LOAD = 
         y_train_s = np.log(y_train_s+1)    
     X_train_s = df1_train_s[:,1:df1_train_s.shape[1]]
 
-    ## get y and X test
-    y_test_s = df1_test_s[:,0]
-    if LOG_TRANSFORM:
-        y_test_s = np.log(y_test_s+1)
-    X_test_s = df1_test_s[:,1:df1_test_s.shape[1]]
-
     ## reshape input to be [samples, time steps, features]
-    X_train_s = np.reshape(X_train_s, (X_train_s.shape[0], look_back, X_train_s.shape[1]))
-    X_test_s  = np.reshape(X_test_s,  (X_test_s.shape[0],  look_back, X_test_s.shape[1]))
+    X_train_s = np.reshape(X_train_s, (X_train_s.shape[0], look_back, len(x_vars)+1) )
+
+
+    ## get y and X test
+    if not (df1_test is None):
+
+        df1_test_c  = df1_test.loc[ df1_test.index.get_level_values('CCY')==c, ['y_var']+x_vars_plus]
+        y_test = df1_test_c['y_var'].droplevel('CCY')
+       
+        ## scale the data set:
+        df1_test_s  = scaler.transform(df1_test_c)
+
+        ## get y and X test
+        y_test_s = df1_test_s[:,0]
+        if LOG_TRANSFORM:
+            y_test_s = np.log(y_test_s+1)
+        X_test_s = df1_test_s[:,1:df1_test_s.shape[1]]
+
+        ## reshape input to be [samples, time steps, features]
+        X_test_s  = np.reshape(X_test_s,  (X_test_s.shape[0],  look_back, len(x_vars)+1) )
+
 
     # get folder name of the trained model:
     folder_name_trained_model = output_folder_model + 'trained_model_lstm_'+c
@@ -96,21 +110,21 @@ def get_lstm(df1_train, df1_test, x_vars_plus, c = '_Total_', PRINT = 1, LOAD = 
         # create and check the LSTM network
         # The network has a visible layer with len(x_vars_plus) input, a hidden layer with 4 LSTM blocks, and an output layer that makes a single value prediction. The default sigmoid activation function is used for the LSTM blocks. 
         lstm_model = Sequential()
-        lstm_model.add(LSTM(1, input_shape=(  look_back, len(x_vars_plus))))
+        lstm_model.add(LSTM(1, input_shape=(  look_back, len(x_vars)+1)))
         lstm_model.add(Dense(1))
         lstm_model.compile(loss='mean_squared_error', optimizer='adam')
         if PRINT:
             # show the model summary:
             print(lstm_model.summary())
 
-        # This callback will stop the training when there is no improvement in the loss for three consecutive epochs.
-        callback = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=3)
+        # This callback will stop the training when there is no improvement in the loss for two consecutive epochs.
+        callback = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=2)
 
         # Fit the LSTM
         if PRINT:
             print('\nStart training ...\n')
         # The network is trained a number of epochs, and a batch size of 1 is used.
-        lstm_model.fit(X_train_s, y_train_s,  validation_data=(X_test_s, y_test_s), epochs=100, batch_size=1, verbose=2, callbacks=[callback])
+        lstm_model.fit(X_train_s, y_train_s,   epochs=100, batch_size=1, verbose=2, callbacks=[callback])
 
         # save the trained model
         lstm_model.save(folder_name_trained_model)
@@ -207,7 +221,7 @@ def plot_descriptives_per_moth(df):
 
 def get_arima(df1_train, smodels, x_vars, c = '_Total_', PRINT = 1, LOAD = 1, PLOT = 0, output_folder_model = ''):
     """Run the SARIMA model
-       SARIMA stands for Seasonal Autoregression Integrated Moving Average """
+       SARIMA stands for Seasonal Autoregressive Integrated Moving Average """
     if PRINT:
         print('\n'+'-'*100)
         print('SARIMA model for '+c+'\n')
@@ -259,7 +273,7 @@ def get_arima(df1_train, smodels, x_vars, c = '_Total_', PRINT = 1, LOAD = 1, PL
 
 
 
-def get_error_stats_in(df1_train, smodels, res_stats_in, x_vars, c = '_Total_', PLOT = 1):
+def get_error_stats_in(df1_train, smodels, df, res_stats_in, x_vars, c = '_Total_', PLOT = 1):
     """Forecast in the training sample and get the error statistics"""
 
     # get the model
@@ -270,7 +284,7 @@ def get_error_stats_in(df1_train, smodels, res_stats_in, x_vars, c = '_Total_', 
 
     # Get the error statistics of the predictions and observations of the training period:
     predictions_training = smodel.predict_in_sample(X_train, start = min(y_train.index), end=max(y_train.index))
-    res_stats_in_c = error_statistics(y_train, predictions_training, colname = c)
+    res_stats_in_c = error_statistics(y_train, predictions_training, df, colname = c)
 
     res_stats_in[c] = res_stats_in_c
 
@@ -338,7 +352,7 @@ def plot_model_results(trained_model, df1, X_test, y_test, y_var = 'y_var', cond
 
 
 
-def get_error_stats_out(df1_test, smodels, res_stats_out, x_vars, horizon, c = '_Total_', DYNAMIC_FORCASTING = 1, PLOT = 1, df1_train = None):
+def get_error_stats_out(df1_test, smodels, df, res_stats_out, x_vars, horizon, c = '_Total_', DYNAMIC_FORCASTING = 1, PLOT = 1, df1_train = None):
     """Forecast in the hold-out sample and get the error statistics"""
     # get the model
     smodel = smodels[c] 
@@ -356,7 +370,7 @@ def get_error_stats_out(df1_test, smodels, res_stats_out, x_vars, horizon, c = '
     index_of_fc = pd.date_range(X_test.index[-1], periods = horizon, freq='MS')
 
     # get the error statistics:
-    res_stats_out_c = error_statistics(y_test, fitted.values, colname = c)    
+    res_stats_out_c = error_statistics(y_test, fitted.values, df, colname = c)    
     res_stats_out[c] = res_stats_out_c
     
     if PLOT:
@@ -507,7 +521,7 @@ def decompose_time_series(df, y_var='Revenue',  condition_variable = 'CCY', samp
 
 
 
-def error_statistics(y_true, y_pred, PRINT = 0, ADDITIONAL_STATS=1, RND =3, colname='Error Statistics'):
+def error_statistics(y_true, y_pred, df, PRINT = 0, ADDITIONAL_STATS=1, RND =3, colname='Error Statistics'):
     """
     Get error statistics of the true and predicted values
     :param y_true: (vector) true values.
@@ -524,13 +538,21 @@ def error_statistics(y_true, y_pred, PRINT = 0, ADDITIONAL_STATS=1, RND =3, coln
     # 'Number of cases': len(y_true),
     res_stats =pd.DataFrame.from_dict({ 'Root mean squared error': round(np.sqrt(mse), RND),'Mean squared error ':round(mse, RND), 'Mean absolute error':round(mean_absolute_error, RND), 'Median absolute error':round(median_absolute_error, RND), 'Mean absolute prctg error': round(mean_absolute_percentage_error, RND)} , orient='index',columns=[colname]) 
 
+    if 1:
+        Total_observed_Profit  = sum( df.loc[y_true.index,"Profit"].values )
+        Total_predicted_Profit = sum( y_pred) 
+        Percentage_error_Total_Profit = (Total_predicted_Profit - Total_observed_Profit)/Total_observed_Profit*100
+        res_stats.loc['Total observed Profit '] =  round(Total_observed_Profit, RND)
+        res_stats.loc['Total predicted Profit'] =  round(Total_predicted_Profit, RND)
+        s.loc['Percentage error total Profit'] =  round(Percentage_error_Total_Profit, RND)
+
     if ADDITIONAL_STATS:
         r2 = metrics.r2_score(y_true, y_pred)
         explained_variance = metrics.explained_variance_score(y_true, y_pred)
         correlation, _ = pearsonr(y_true, y_pred)
 
         res_stats.loc['Explained variance'] =  round(explained_variance, RND)
-        res_stats.loc['R2']                =  round(r2, RND)
+        #res_stats.loc['R2']                =  round(r2, RND)
         res_stats.loc['Correlation']       =  round(correlation,RND)
 
     if PRINT:
@@ -547,7 +569,7 @@ def error_statistics(y_true, y_pred, PRINT = 0, ADDITIONAL_STATS=1, RND =3, coln
             print('\nExplained variance        :', round(explained_variance, RND))
             #print('\nmean_squared_log_error: ', round(mean_squared_log_error,RND))
             print('\nR2                        :', round(r2, RND))
-            print('\Correlation                :', round(Correlation, RND))
+            print('\Correlation                :', round(correlation, RND))
         print('\n-------------------------------------------------------------------------')
      
     return res_stats
