@@ -18,133 +18,13 @@ from sklearn.model_selection import RandomizedSearchCV
 from pandas.api.types import is_numeric_dtype
 from scipy.stats import pearsonr
 import tensorflow as tf
-from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.layers import LSTM
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from sklearn.base import BaseEstimator, TransformerMixin
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dropout
-from tensorflow.keras.layers import Dense
+from tensorflow.keras.layers import Dense, LSTM, Flatten, Dropout,SimpleRNN
 from tensorflow import keras
-
-
-def add_lagged(df1, x_vars, lag = 1):
-    df1 = df1.copy()
-    df_lagged= df1[x_vars+['y_var_lagged']].groupby(level='CCY').shift(lag)
-    df1 = pd.merge(df1, df_lagged ,left_index=True, right_index=True, suffixes=('', '_lagged'+str(lag)))
-        
-    return df1
-
-
-def get_lstm(df1_train, df1_test, x_vars_plus, x_vars, c = '_Total_', PRINT = 1, LOAD = 1,  output_folder_model = '', LOG_TRANSFORM = 0,    look_back = 1):
-    """Run the LSTM model
-        LSTM RNN stands for Long Short-Term Memory recurrent neural network 
-        LSTM networks use memory blocks - instead of neurons - connected through layers.
-
-        A block has components that make it smarter than a classical neuron and a memory for recent sequences. A block contains gates that manage the block’s state and output. A block operates upon an input sequence, and each gate within a block uses the sigmoid activation units to control whether it is triggered or not, making the change of state and addition of information flowing through the block conditional.
-
-        There are three types of gates within a unit:
-
-        *    Forget Gate: conditionally decides what information to throw away from the block
-        *    Input Gate: conditionally decides which values from the input to update the memory state
-        *    Output Gate: conditionally decides what to output based on input and the memory of the block       
-       """
-    if PRINT:
-        print('\n'+'-'*100)
-        print('LSTM RNN model for '+c+'\n')
-        if LOG_TRANSFORM:
-            print('\nUsing log-transformation on the response\n')
-    # prepare the data
-    
-    ## lag:
-    ## normalize the dataset
-    ## Reason: LSTMs are sensitive to the scale of the input data, specifically when the sigmoid (default) or tanh activation functions are used.
-    scaler = MinMaxScaler(feature_range=(0, 1))
-
-    df1_train_c = df1_train.loc[df1_train.index.get_level_values('CCY')==c,['y_var']+x_vars_plus]
-
-    ## get y and X train
-    y_train = df1_train_c['y_var'].droplevel('CCY')
-
-    ## scale the data set:
-    scaler.fit(df1_train_c)
-    df1_train_s = scaler.transform(df1_train_c)
-
-    ## get y and X train
-    y_train_s = df1_train_s[:,0]
-    if LOG_TRANSFORM:
-        y_train_s = np.log(y_train_s+1)    
-    X_train_s = df1_train_s[:,1:df1_train_s.shape[1]]
-
-    ## reshape input to be [samples, time steps, features]
-    X_train_s = np.reshape(X_train_s, (X_train_s.shape[0], look_back, len(x_vars)+1) )
-
-
-    ## get y and X test
-    if not (df1_test is None):
-
-        df1_test_c  = df1_test.loc[ df1_test.index.get_level_values('CCY')==c, ['y_var']+x_vars_plus]
-        y_test = df1_test_c['y_var'].droplevel('CCY')
-       
-        ## scale the data set:
-        df1_test_s  = scaler.transform(df1_test_c)
-
-        ## get y and X test
-        y_test_s = df1_test_s[:,0]
-        if LOG_TRANSFORM:
-            y_test_s = np.log(y_test_s+1)
-        X_test_s = df1_test_s[:,1:df1_test_s.shape[1]]
-
-        ## reshape input to be [samples, time steps, features]
-        X_test_s  = np.reshape(X_test_s,  (X_test_s.shape[0],  look_back, len(x_vars)+1) )
-
-
-    # get folder name of the trained model:
-    folder_name_trained_model = output_folder_model + 'trained_model_lstm_'+c
-    # create output_folder if not existant:
-    os.makedirs(folder_name_trained_model, exist_ok=True)
-
-    # check if trained model already exists:
-    if (os.path.isdir(folder_name_trained_model)) and LOAD:
-        # load the trained model:        
-        lstm_model = keras.models.load_model(folder_name_trained_model)
-    else:
-        # create and check the LSTM network
-        # The network has a visible layer with len(x_vars_plus) input, a hidden layer with 4 LSTM blocks, and an output layer that makes a single value prediction. The default sigmoid activation function is used for the LSTM blocks. 
-        lstm_model = Sequential()
-        lstm_model.add(LSTM(1, input_shape=(  look_back, len(x_vars)+1)))
-        lstm_model.add(Dense(1))
-        lstm_model.compile(loss='mean_squared_error', optimizer='adam')
-        if PRINT:
-            # show the model summary:
-            print(lstm_model.summary())
-
-        # This callback will stop the training when there is no improvement in the loss for two consecutive epochs.
-        callback = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=2)
-
-        # Fit the LSTM
-        if PRINT:
-            print('\nStart training ...\n')
-        # The network is trained a number of epochs, and a batch size of 1 is used.
-        lstm_model.fit(X_train_s, y_train_s,   epochs=100, batch_size=1, verbose=2, callbacks=[callback])
-
-        # save the trained model
-        lstm_model.save(folder_name_trained_model)
-
-    # make predictions
-    if PRINT:
-        print('\nGet predictions ...\n')
-    trainPredict_s = lstm_model.predict(X_train_s)
-    testPredict_s  = lstm_model.predict(X_test_s)
-
-    # invert predictions
-    trainPredict  = scaler.inverse_transform(np.concatenate((trainPredict_s,df1_train_s[:,1:df1_train_s.shape[1]]),axis=1))[:,0]
-    testPredict   = scaler.inverse_transform(np.concatenate((testPredict_s,df1_test_s[:,1:df1_test_s.shape[1]]),axis=1))[:,0]     
-
-    if LOG_TRANSFORM:
-        trainPredict = np.exp(trainPredict) - 1
-        testPredict  = np.exp(testPredict)  - 1
-
-    return  {'trainPredict':trainPredict, 'testPredict':testPredict, 'y_train':y_train, 'y_test':y_test}
-
+from lightgbm import LGBMRegressor, log_evaluation, early_stopping 
+from sklearn.linear_model import TweedieRegressor
 
 
 def plot_observed_vs_predicted(y_obs, y_pred, title1 = 'Observed vs predicted'):
@@ -217,7 +97,8 @@ def plot_descriptives_per_moth(df):
     plt.show()
 
     return ratios_CCY
-    
+
+
 
 def get_arima(df1_train, smodels, x_vars, c = '_Total_', PRINT = 1, LOAD = 1, PLOT = 0, output_folder_model = ''):
     """Run the SARIMA model
@@ -271,9 +152,324 @@ def get_arima(df1_train, smodels, x_vars, c = '_Total_', PRINT = 1, LOAD = 1, PL
 
 
 
+def add_lagged(df1, x_vars, lag = 1):
+    df1 = df1.copy()
+    df_lagged= df1[['y_var_lagged']+x_vars].groupby(level='CCY').shift(lag)
+    df1 = pd.merge(df1, df_lagged ,left_index=True, right_index=True, suffixes=('', str(lag+1)))
+        
+    return df1
 
 
-def get_error_stats_in(df1_train, smodels, df, res_stats_in, x_vars, c = '_Total_', PLOT = 1):
+
+def get_lstm(df1_train, df1_test, x_vars_plus, x_vars, c = '_Total_', PRINT = 1, LOAD = 1,  output_folder_model = '', MODEL_TYPE= 'LSTM', UNITS = 16, LOG_TRANSFORM = 0,    look_back = 1, SCALE ='normalize', MAX_EPOCHS = 100):
+    """Run the LSTM model
+        LSTM RNN stands for Long Short-Term Memory recurrent neural network 
+        LSTM networks use memory blocks - instead of neurons - connected through layers.
+
+        A block has components that make it smarter than a classical neuron and a memory for recent sequences. A block contains gates that manage the block’s state and output. A block operates upon an input sequence, and each gate within a block uses the sigmoid activation units to control whether it is triggered or not, making the change of state and addition of information flowing through the block conditional.
+
+        There are three types of gates within a unit:
+
+        *    Forget Gate: conditionally decides what information to throw away from the block
+        *    Input Gate: conditionally decides which values from the input to update the memory state
+        *    Output Gate: conditionally decides what to output based on input and the memory of the block       
+       """
+    if PRINT:
+        print('\n'+'-'*100)
+        print(f'{MODEL_TYPE} model for {c}\n')
+        if LOG_TRANSFORM:
+            print('\nUsing log-transformation on the response\n')
+    # prepare the data
+    
+    df1_train_c = df1_train.loc[df1_train.index.get_level_values('CCY')==c,['y_var']+x_vars_plus]
+
+    ## get y and X train
+    y_train = df1_train_c['y_var'].droplevel('CCY')
+
+
+    ## lag:
+    ## scale the dataset
+    ## Reason: LSTMs are sensitive to the scale of the input data, specifically when the sigmoid (default) or tanh activation functions are used.
+    if SCALE =='normalize':
+        scaler = StandardScaler()
+    elif SCALE =='minmax':
+        scaler = MinMaxScaler(feature_range=(0, 1))
+    else:
+        scaler = IdentityTransformer()
+
+    ## scale the data set:
+    scaler.fit(df1_train_c)
+    df1_train_s = scaler.transform(df1_train_c)
+
+    ## get y and X train
+    y_train_s = df1_train_s[:,0]
+    if LOG_TRANSFORM:
+        y_train_s = np.log(y_train_s+1)    
+
+    X_train_s0 = df1_train_s[:,1:df1_train_s.shape[1]]
+
+    ## reshape input to be [samples, time steps, features]
+    X_train_s = np.reshape(X_train_s0.copy(), (X_train_s0.shape[0],   look_back, len(x_vars)+1 ) )
+
+    # reverse the time order:
+    X_train_s = X_train_s[:,list(reversed(range(look_back))),:]
+
+    ## swap
+    #X_train_s = np.transpose(X_train_s, axes=[0,2,1])
+
+    ## get y and X test
+    if not (df1_test is None):
+
+        df1_test_c  = df1_test.loc[ df1_test.index.get_level_values('CCY')==c, ['y_var']+x_vars_plus]
+        y_test = df1_test_c['y_var'].droplevel('CCY')
+       
+        ## scale the data set:
+        df1_test_s  = scaler.transform(df1_test_c)
+
+        ## get y and X test
+        y_test_s = df1_test_s[:,0]
+        if LOG_TRANSFORM:
+            y_test_s = np.log(y_test_s+1)
+        X_test_s0 = df1_test_s[:,1:df1_test_s.shape[1]]
+
+        ## reshape input to be [samples, time steps, features]
+        X_test_s  = np.reshape(X_test_s0.copy(),  (X_test_s0.shape[0],    look_back, len(x_vars)+1) )
+
+        # reverse the time order:
+        X_test_s = X_test_s[:,list(reversed(range(look_back))),:]
+
+    # get folder name of the trained model:
+    folder_name_trained_model = output_folder_model + 'trained_model_lstm_'+c
+    # create output_folder if does not exist:
+    os.makedirs(folder_name_trained_model, exist_ok=True)
+
+    # check if trained model already exists:
+    if (os.path.isdir(folder_name_trained_model)) and LOAD:
+        # load the trained model:        
+        lstm_model = keras.models.load_model(folder_name_trained_model)
+    else:
+        # create and check the LSTM network
+        # The network has a visible layer with len(x_vars_plus) input, a hidden layer with 4 LSTM blocks, and an output layer that makes a single value prediction. The default sigmoid activation function is used for the LSTM blocks. 
+        lstm_model = Sequential()
+        input_shape=( look_back, len(x_vars)+1)
+        if MODEL_TYPE== 'LSTM':
+            lstm_model.add(LSTM(units = UNITS, input_shape=input_shape)) 
+            lstm_model.add(Dense(units = len(x_vars)) )             
+        if MODEL_TYPE== 'RNN':
+            lstm_model.add(SimpleRNN(units = UNITS, input_shape = input_shape)) # , dropout = 0.1, recurrent_dropout = 0.1))
+            lstm_model.add(Dense(units = len(x_vars)) ) 
+        if MODEL_TYPE== 'LINEAR':
+            lstm_model.add(Flatten())  
+        if MODEL_TYPE== 'DENSE':            
+            lstm_model.add(Flatten())    
+            lstm_model.add(Dense(units = input_shape[0]*input_shape[1], activation='relu'))
+            lstm_model.add(Dense(units = len(x_vars)) )          
+        lstm_model.add(Dense(1))
+        # complie the model:
+        # Adam optimization is a stochastic gradient descent method that is based on adaptive estimation of first-order and second-order moments.
+        lstm_model.compile(loss='mean_squared_error', optimizer='adam', metrics=['mean_squared_error','mean_absolute_error']) # tf.keras.optimizers.Adam(learning_rate=0.01)
+        if PRINT:
+            print('Input shape:', input_shape)
+            test_input = np.reshape(np.ones(input_shape),(1,input_shape[0],input_shape[1]))
+            print('Output shape:', lstm_model(test_input).shape)
+            # show the model summary:
+            print(lstm_model.summary())
+
+        # This callback will stop the training when there is no improvement in the loss for two consecutive epochs.
+        callback = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=2)
+
+        # Fit the LSTM
+        if PRINT:
+            print('\nStart training ...\n')
+
+        # The network is trained a number of epochs, and a batch size of 1 is used.
+        lstm_model.fit(X_train_s, y_train_s,   epochs=MAX_EPOCHS, batch_size=1, verbose=2, callbacks=[callback])# , validation_split=0.2)
+
+        # save the trained model
+        lstm_model.save(folder_name_trained_model)
+
+    # make predictions
+    if PRINT:
+        print('\nGet predictions ...\n')
+
+    trainPredict_s = lstm_model.predict(X_train_s)
+    testPredict_s  = lstm_model.predict(X_test_s)
+
+    # invert predictions
+    if SCALE is None:
+        trainPredict = trainPredict_s
+        testPredict  = testPredict_s
+    else:    
+        trainPredict  = scaler.inverse_transform(np.concatenate([trainPredict_s,X_train_s0],axis=1))[:,0]
+        testPredict   = scaler.inverse_transform(np.concatenate([testPredict_s, X_test_s0 ],axis=1))[:,0]
+
+    if LOG_TRANSFORM:
+        trainPredict = np.exp(trainPredict) - 1
+        testPredict  = np.exp(testPredict)  - 1
+
+    return  {'trainPredict':trainPredict, 'testPredict':testPredict, 'y_train':y_train, 'y_test':y_test}
+
+
+
+def train_model(df1_train, c, x_vars_plus, model_type = 'tweedie', TUNE = True, output_folder_model ='', LOAD = 0, X_val = None, y_val = None, LOG_TRANSFORM = 0):
+    """function to tune and train the model"""
+
+    if 1:
+        print('\n'+'-'*100)
+        print('GBM for '+c+'\n')
+
+    df1_train_c = df1_train.loc[df1_train.index.get_level_values('CCY')==c,['y_var']+x_vars_plus]
+
+    ## get y and X train
+    y_train = df1_train_c['y_var'].droplevel('CCY')
+
+    ## get y and X train
+    if LOG_TRANSFORM:
+        y_train = np.log(y_train+1)    
+
+    X_train = df1_train_c[x_vars_plus]
+
+    # get file name of the trained model:
+    file_name_trained_model = output_folder_model + model_type+ '_model.pkl'
+
+    # check if trained model already exists:
+    if (os.path.isfile(file_name_trained_model)) and LOAD:
+        # load the trained model:        
+        #model  = keras.models.load_model(folder_name_trained_model)        
+        model = pickle.load(open(file_name_trained_model, "rb"))
+
+        return model 
+
+    # initialize optional weights and arguments for the fitting process:
+    fit_args = {}
+
+    # Use an LGBM or RF ML model:    
+    if model_type in ['lgbm','rf','lgbm_tw']:
+        n_estimators = 50 
+        params = {'subsample': 0.5, 'num_leaves': 30, 'max_depth': 10, 'learning_rate': 0.3} #'boosting_type' : 'dart'}
+        if model_type == 'rf':
+                params =  {'num_leaves': 20, 'max_depth': 5, 'feature_fraction' : 0.8, 'learning_rate': 1, 'boosting_type' : 'rf', 'bagging_freq' : 1, 'subsample_freq' : 1, 'bagging_fraction' : 0.8 } 
+                # {'subsample': 0.5, 'num_leaves': 31, 'max_depth': 5, 'learning_rate': 0.01}                
+        if model_type == 'lgbm_tw':
+                params =  params  | {'objective': 'tweedie', 'metric': 'tweedie'}     
+
+        clf = LGBMRegressor( random_state=42, n_estimators=n_estimators, **params)
+        
+        tuning_dict = { 
+                                'max_depth': [3,  10, 15, -1], #'max_depth': [3, 5, 15, 20, 30],
+                                'num_leaves': [5,  20, 30, 40], #'num_leaves': [5, 10, 20, 30],
+                                #'subsample': [0.3, 0.5, 1] #'subsample': [0.1, 0.2, 0.8, 1]                  
+            }
+        if model_type in ['lgbm','lgbm_tw']:
+            tuning_dict = tuning_dict | {'learning_rate': [0.05, 0.1, 0.2, 0.3, 0.4],} # 'learning_rate': [0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5],
+        if model_type in ['rf']:
+            tuning_dict = tuning_dict | {'feature_fraction' : [0.1, 0.2, 0.5, 0.8, 1]   }
+        if model_type in ['lgbm_tw']:
+            tuning_dict = tuning_dict | { 'tweedie_variance_power': [ 1.1, 1.2, 1.5, 1.7, 1.8, 1.9],} # constraints: 1.0 <= tweedie_variance_power < 2.0,  see https://lightgbm.readthedocs.io/en/latest/Parameters.html
+        
+        fit_args = {'eval_metric' : ['neg_mean_absolute_error','neg_root_mean_squared_error'], 
+               }  
+        if not ((X_val is None) or (y_val is None)) :
+            fit_args = fit_args | {'callbacks': [ log_evaluation(n_estimators), early_stopping(2)],
+                    'eval_set' : [[X_val, y_val]], }
+        
+    # Use a tweedie GLM model:    
+    if model_type in ['tweedie']:
+        params =  {'power': 1.2, 'alpha': 0.1} # {'power': 0.5, 'alpha': 0.05} # {'power': 1.9, 'alpha': 0.1} # link ='auto'
+
+        clf = TweedieRegressor( **params, solver='newton-cholesky')
+
+        
+        tuning_dict = { 
+                     'power': [0, 1.1, 1.2, 1.5, 1.7, 1.9, 2, 2.5, 3], 
+                     'alpha': [0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 1, 2, 3]               
+            }
+
+
+    #create, train and do inference of the model
+    if TUNE:
+        # Tune hyper-parameters and final model using cv cross-validation with n_iter parameter settings sampled from random search. Random search can cover a larger area of the parameter space with the same number of consider setting compared to e.g. grid search.
+        rs = RandomizedSearchCV(clf, tuning_dict, 
+            scoring= {'MAE': make_scorer(metrics.mean_absolute_error), 'RMSE':  make_scorer(metrics.mean_squared_error)}, #'f1', 'balanced_accuracy' Overview of scoring parameters: https://scikit-learn.org/stable/modules/model_evaluation.html#scoring-parameter
+                                # default: accuracy_score for classification and sklearn.metrics.r2_score for regression
+            refit= 'MAE',
+            cv=10, 
+            return_train_score=False, 
+            n_iter = 50,
+            verbose = False,
+            random_state = 888
+           
+        )
+        print("\nTuning hyper-parameters ..")
+        rs.fit(X_train, y_train , **fit_args)    
+        
+        print("\nTuned hyper-parameters :(best score)     ",rs.best_score_)
+        print("\nTuned hyper-parameters :(best parameters) ",rs.best_params_)
+        
+        model = clf
+        clf.set_params(**rs.best_params_)
+    else:
+        model = clf
+        
+    # show the model parameters used by the model:    
+    print("\nUsed model parameters : ",model.get_params())
+
+    # fit the model:
+    model.fit(X_train, y_train )
+
+    # save the trained model 
+    pickle.dump(model, open(file_name_trained_model, "wb"))
+
+    return  model
+
+
+
+def error_statistics(y_true, y_pred, PRINT = 0, ADDITIONAL_STATS=1, RND =3, colname='Error Statistics'):
+    """
+    Get error statistics of the true and predicted values
+    :param y_true: (vector) true values.
+    :param y_pred: (vector) predicted values.
+    :param ADDITIONAL_STATS: (binary) indicates whether to show additional error statistics.
+    :param RND: (int) indicates the number of digits of the printed error statistics.
+    """
+
+    mean_absolute_error = metrics.mean_absolute_error(y_true, y_pred)
+    mse = metrics.mean_squared_error(y_true, y_pred)
+    #mean_squared_log_error=metrics.mean_squared_log_error(y_true, y_pred)
+    median_absolute_error = metrics.median_absolute_error(y_true, y_pred)
+    mean_absolute_percentage_error =metrics.mean_absolute_percentage_error(y_true, y_pred)
+
+    # 'Number of cases': len(y_true),
+    res_stats =pd.DataFrame.from_dict({ 
+        'Root mean squared error': round(np.sqrt(mse), RND),
+        #'Mean squared error ':round(mse, RND), 
+        'Mean absolute error':round(mean_absolute_error, RND), 
+        'Median absolute error':round(median_absolute_error, RND), 
+        #'Mean absolute prctg error': round(mean_absolute_percentage_error, RND)
+        } , orient='index',columns=[colname]) 
+
+    if 1:
+        Total_observed_Profit  = sum( y_true)
+        Total_predicted_Profit = sum( y_pred) 
+        Percentage_error_Total_Profit = (Total_predicted_Profit - Total_observed_Profit)/Total_observed_Profit*100
+        res_stats.loc['Total observed Profit '] =  round(Total_observed_Profit, RND)
+        res_stats.loc['Total predicted Profit'] =  round(Total_predicted_Profit, RND)
+        res_stats.loc['Percentage error total Profit'] =  round(Percentage_error_Total_Profit, RND)
+
+    if ADDITIONAL_STATS:
+        r2 = metrics.r2_score(y_true, y_pred)
+        explained_variance = metrics.explained_variance_score(y_true, y_pred)
+        correlation, _ = pearsonr(y_true, y_pred)
+
+        res_stats.loc['Explained variance'] =  round(explained_variance, RND)
+        #res_stats.loc['R2']                =  round(r2, RND)
+        res_stats.loc['Correlation']       =  round(correlation,RND)
+     
+    return res_stats
+
+
+
+def get_error_stats_in(df1_train, smodels,  res_stats_in, x_vars, c = '_Total_', PLOT = 1):
     """Forecast in the training sample and get the error statistics"""
 
     # get the model
@@ -283,8 +479,14 @@ def get_error_stats_in(df1_train, smodels, df, res_stats_in, x_vars, c = '_Total
     X_train = df1_train.loc[df1_train.index.get_level_values('CCY')==c,x_vars].droplevel('CCY')
 
     # Get the error statistics of the predictions and observations of the training period:
-    predictions_training = smodel.predict_in_sample(X_train, start = min(y_train.index), end=max(y_train.index))
-    res_stats_in_c = error_statistics(y_train, predictions_training, df, colname = c)
+    if hasattr(smodel, 'predict_in_sample'):
+        predictions_training = smodel.predict_in_sample(X_train, start = min(y_train.index), end=max(y_train.index))
+        predictions_training_values = predictions_training.values
+    else:
+        predictions_training = smodel.predict(X_train)    
+        predictions_training_values = predictions_training
+
+    res_stats_in_c = error_statistics(y_train, predictions_training, colname = c)
 
     res_stats_in[c] = res_stats_in_c
 
@@ -292,7 +494,7 @@ def get_error_stats_in(df1_train, smodels, df, res_stats_in, x_vars, c = '_Total
         # plot Actual vs Fitted
         plt.rcParams.update({'figure.figsize':(24,5)})
         plt.plot(pd.Series(y_train,index=y_train.index))
-        plt.plot(pd.Series(predictions_training.values, index=y_train.index), color='darkgreen')
+        plt.plot(pd.Series(predictions_training_values, index=y_train.index), color='darkgreen')
         plt.tick_params('x', labelrotation=45)
         plt.title(c+'  in-sample: Observed vs predicted')
         plt.legend(labels=['Observed', 'Predicted'])
@@ -352,7 +554,7 @@ def plot_model_results(trained_model, df1, X_test, y_test, y_var = 'y_var', cond
 
 
 
-def get_error_stats_out(df1_test, smodels, df, res_stats_out, x_vars, horizon, c = '_Total_', DYNAMIC_FORCASTING = 1, PLOT = 1, df1_train = None):
+def get_error_stats_out(df1_test, smodels,  res_stats_out, x_vars, horizon, c = '_Total_', DYNAMIC_FORCASTING = 1, PLOT = 1, df1_train = None):
     """Forecast in the hold-out sample and get the error statistics"""
     # get the model
     smodel = smodels[c] 
@@ -370,7 +572,7 @@ def get_error_stats_out(df1_test, smodels, df, res_stats_out, x_vars, horizon, c
     index_of_fc = pd.date_range(X_test.index[-1], periods = horizon, freq='MS')
 
     # get the error statistics:
-    res_stats_out_c = error_statistics(y_test, fitted.values, df, colname = c)    
+    res_stats_out_c = error_statistics(y_test, fitted.values,  colname = c)    
     res_stats_out[c] = res_stats_out_c
     
     if PLOT:
@@ -400,6 +602,32 @@ def get_error_stats_out(df1_test, smodels, df, res_stats_out, x_vars, horizon, c
         plt.show()
 
     return res_stats_out
+
+
+
+def get_model_comparison(model_objects_train = (res_stats_in, res_stats_in_gbm, res_stats_in_rnn),model_objects_test = (res_stats_out, res_stats_out_gbm, res_stats_out_rnn), model_names   = ['SARIMA', 'GBM', 'LSTM'], target_metric = 'Root mean squared error'):
+    
+    n_models = len(model_objects)
+
+    df_res = pd.DataFrame()
+    for i in range(n_models):
+        # create the data frame for model i
+        df_i = pd.concat([model_objects_train[i].loc[target_metric,:], model_objects_test[i].loc[target_metric,:]], axis=1 )
+        df_i.columns =['Train','Test']
+        df_i['Model'] = model_names[i]
+        df_i.set_index(['Model',df_i.index],inplace=True)
+        # append df_i to the result data frame
+        df_res = df_res.append(df_i)
+
+    # plot training performance:
+    df_res['Train'].unstack(0).plot(kind='bar',title='In-sample performance of different models', ylabel=target_metric)
+    # plot test performance:
+    df_res['Test'].unstack(0).plot(kind='bar',title='Out-of-sample performance of different models', ylabel=target_metric)
+
+    # get the best performing model per locale:
+    df_res_best = df_res.loc[df_res.groupby(level=1).Test.idxmin(),'Test'].copy()
+
+    return df_res, df_res_best
 
 
 
@@ -482,7 +710,16 @@ def plotseasonal(res, axes, title='' ):
     axes[3].set_ylabel('Residual')
 
 
-
+class IdentityTransformer(BaseEstimator, TransformerMixin):
+    def __init__(self):
+        pass
+    
+    def fit(self, input_array, y=None):
+        return self
+    
+    def transform(self, input_array, y=None):
+        return input_array*1
+    
 def decompose_time_series(df, y_var='Revenue',  condition_variable = 'CCY', samples='all', period=5, decomposition_model_type='', output_folder_plots = '', title1='Decomposition', SAVE_OUTPUT = 0, PLOT = 1):
     """Seasonal decomposition using moving averages"""
     # set period=5 for daily data (there is no data for Saturday and Sunday)
@@ -518,61 +755,6 @@ def decompose_time_series(df, y_var='Revenue',  condition_variable = 'CCY', samp
         plt.show()
 
     return results
-
-
-
-def error_statistics(y_true, y_pred, df, PRINT = 0, ADDITIONAL_STATS=1, RND =3, colname='Error Statistics'):
-    """
-    Get error statistics of the true and predicted values
-    :param y_true: (vector) true values.
-    :param y_pred: (vector) predicted values.
-    :param ADDITIONAL_STATS: (binary) indicates whether to show additional error statistics.
-    :param RND: (int) indicates the nnumber of digits of the printed error statistics.
-    """
-    mean_absolute_error = metrics.mean_absolute_error(y_true, y_pred)
-    mse = metrics.mean_squared_error(y_true, y_pred)
-    #mean_squared_log_error=metrics.mean_squared_log_error(y_true, y_pred)
-    median_absolute_error = metrics.median_absolute_error(y_true, y_pred)
-    mean_absolute_percentage_error =metrics.mean_absolute_percentage_error(y_true, y_pred)
-
-    # 'Number of cases': len(y_true),
-    res_stats =pd.DataFrame.from_dict({ 'Root mean squared error': round(np.sqrt(mse), RND),'Mean squared error ':round(mse, RND), 'Mean absolute error':round(mean_absolute_error, RND), 'Median absolute error':round(median_absolute_error, RND), 'Mean absolute prctg error': round(mean_absolute_percentage_error, RND)} , orient='index',columns=[colname]) 
-
-    if 1:
-        Total_observed_Profit  = sum( df.loc[y_true.index,"Profit"].values )
-        Total_predicted_Profit = sum( y_pred) 
-        Percentage_error_Total_Profit = (Total_predicted_Profit - Total_observed_Profit)/Total_observed_Profit*100
-        res_stats.loc['Total observed Profit '] =  round(Total_observed_Profit, RND)
-        res_stats.loc['Total predicted Profit'] =  round(Total_predicted_Profit, RND)
-        s.loc['Percentage error total Profit'] =  round(Percentage_error_Total_Profit, RND)
-
-    if ADDITIONAL_STATS:
-        r2 = metrics.r2_score(y_true, y_pred)
-        explained_variance = metrics.explained_variance_score(y_true, y_pred)
-        correlation, _ = pearsonr(y_true, y_pred)
-
-        res_stats.loc['Explained variance'] =  round(explained_variance, RND)
-        #res_stats.loc['R2']                =  round(r2, RND)
-        res_stats.loc['Correlation']       =  round(correlation,RND)
-
-    if PRINT:
-        print('\n-------------------------------------------------------------------------')
-        print('\nNumber of cases           :', len(y_true))
-        print('\nRoot mean squared error   :', round(np.sqrt(mse), RND))
-        print('\nMean squared error        :', round(mse, RND))
-        print('\nMean absolute error       :', round(mean_absolute_error, RND))
-        print('\nMedian absolute error     :', round(median_absolute_error, RND))
-        print('\nMean absolute prctg error :', round(mean_absolute_percentage_error, RND))
-        print('\n-------------------------------------------------------------------------')        
-        if ADDITIONAL_STATS:
-            print('\n-------------------------------------------------------------------------')
-            print('\nExplained variance        :', round(explained_variance, RND))
-            #print('\nmean_squared_log_error: ', round(mean_squared_log_error,RND))
-            print('\nR2                        :', round(r2, RND))
-            print('\Correlation                :', round(correlation, RND))
-        print('\n-------------------------------------------------------------------------')
-     
-    return res_stats
 
 
 
