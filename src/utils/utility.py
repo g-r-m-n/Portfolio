@@ -25,6 +25,8 @@ from tensorflow.keras.layers import Dense, LSTM, Flatten, Dropout,SimpleRNN
 from tensorflow import keras
 from lightgbm import LGBMRegressor, log_evaluation, early_stopping 
 from sklearn.linear_model import TweedieRegressor
+import optuna.integration.lightgbm as lgb
+from sklearn.model_selection import KFold
 
 
 def plot_observed_vs_predicted(y_obs, y_pred, title1 = 'Observed vs predicted'):
@@ -158,6 +160,195 @@ def add_lagged(df1, x_vars, lag = 1):
     df1 = pd.merge(df1, df_lagged ,left_index=True, right_index=True, suffixes=('', str(lag+1)))
         
     return df1
+
+
+
+def train_model(df1_train, c, x_vars_plus, model_type = 'tweedie', TUNE = True, output_folder_model ='', LOAD = 0, X_val = None, y_val = None, LOG_TRANSFORM = 0):
+    """function to tune and train the model"""
+
+    if 1:
+        print('\n'+'-'*100)
+        print('GBM for '+c+'\n')
+
+    df1_train_c = df1_train.loc[df1_train.index.get_level_values('CCY')==c,['y_var']+x_vars_plus]
+
+    ## get y and X train
+    y_train = df1_train_c['y_var'].droplevel('CCY')
+
+    ## get y and X train
+    if LOG_TRANSFORM:
+        y_train = np.log(y_train+1)    
+
+    X_train = df1_train_c[x_vars_plus]
+
+    # get file name of the trained model:
+    file_name_trained_model = output_folder_model + model_type+'_'+c+'_model.pkl'
+
+    # check if trained model already exists:
+    if (os.path.isfile(file_name_trained_model)) and LOAD:
+        # load the trained model:        
+        #model  = keras.models.load_model(folder_name_trained_model)        
+        model = pickle.load(open(file_name_trained_model, "rb"))
+
+        return model 
+
+    # initialize optional weights and arguments for the fitting process:
+    fit_args = {}
+
+    # Use an LGBM or RF ML model:    
+    if model_type in ['lgbm','rf','lgbm_tw']:    
+        n_estimators = 50     
+        params = {'subsample': 0.5, 'num_leaves': 30, 'max_depth': 10, 'learning_rate': 0.3} #'boosting_type' : 'dart'}
+        if model_type == 'rf':
+                params =  {'num_leaves': 20, 'max_depth': 5, 'feature_fraction' : 0.8, 'learning_rate': 1, 'boosting_type' : 'rf', 'bagging_freq' : 1, 'subsample_freq' : 1} 
+                # {'subsample': 0.5, 'num_leaves': 31, 'max_depth': 5, 'learning_rate': 0.01}                
+        if model_type == 'lgbm_tw':
+                params =  params  | {'objective': 'tweedie', 'metric': 'tweedie'}     
+
+        clf = LGBMRegressor( random_state=42, n_estimators = n_estimators, **params)
+        
+        tuning_dict = { 
+                                'max_depth': [3, 5, 10,  -1], #'max_depth': [3, 5, 15, 20, 30],
+                                'num_leaves': [2, 5, 10, 20, ], #'num_leaves': [5, 10, 20, 30],
+                                #'subsample': [0.3, 0.5, 1] #'subsample': [0.1, 0.2, 0.8, 1]                  
+            }
+        if model_type in ['lgbm','lgbm_tw']:
+            tuning_dict = tuning_dict | {'learning_rate': [0.05, 0.1, 0.2, 0.3, 0.4], # 'learning_rate': [0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5],
+                                         'subsample_freq' : [1],
+                                         } 
+        if model_type in ['rf']:
+            tuning_dict = tuning_dict | {'feature_fraction' : [0.1, 0.2, 0.5, 0.8, 1]   }
+        if model_type in ['lgbm_tw']:
+            tuning_dict = tuning_dict | { 'tweedie_variance_power': [ 1.1, 1.2, 1.5, 1.7, 1.8, 1.9],} # constraints: 1.0 <= tweedie_variance_power < 2.0,  see https://lightgbm.readthedocs.io/en/latest/Parameters.html
+        
+        fit_args = {'eval_metric' : ['neg_mean_absolute_error','neg_root_mean_squared_error'], 
+               }  
+        if not ((X_val is None) or (y_val is None)) :
+            fit_args = fit_args | {'callbacks': [ log_evaluation(n_estimators), early_stopping(2)],
+                    'eval_set' : [[X_val, y_val]], }
+        
+    # Use a tweedie GLM model:    
+    if model_type in ['tweedie']:
+        params =  {'power': 1.2, 'alpha': 0.1} # {'power': 0.5, 'alpha': 0.05} # {'power': 1.9, 'alpha': 0.1} # link ='auto'
+
+        clf = TweedieRegressor( **params, solver='newton-cholesky')
+
+        
+        tuning_dict = { 
+                     'power': [0, 1.1, 1.2, 1.5, 1.7, 1.9, 2, 2.5, 3], 
+                     'alpha': [0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 1, 2, 3]               
+            }
+
+
+    #create, train and do inference of the model
+    if TUNE:
+        # Tune hyper-parameters and final model using cv cross-validation with n_iter parameter settings sampled from random search. Random search can cover a larger area of the parameter space with the same number of consider setting compared to e.g. grid search.
+        rs = RandomizedSearchCV(clf, tuning_dict, 
+            scoring= {'MAE': make_scorer(metrics.mean_absolute_error), 'RMSE':  make_scorer(metrics.mean_squared_error)}, #'f1', 'balanced_accuracy' Overview of scoring parameters: https://scikit-learn.org/stable/modules/model_evaluation.html#scoring-parameter
+                                # default: accuracy_score for classification and sklearn.metrics.r2_score for regression
+            refit= 'MAE',
+            cv=10, 
+            return_train_score=False, 
+            n_iter = 50,
+            verbose = False,
+            random_state = 888
+           
+        )
+        print("\nTuning hyper-parameters ..")
+        rs.fit(X_train, y_train , **fit_args)    
+        
+        print("\nTuned hyper-parameters :(best score)     ",rs.best_score_)
+        print("\nTuned hyper-parameters :(best parameters) ",rs.best_params_)
+        
+        model = clf
+        clf.set_params(**rs.best_params_)
+    else:
+        model = clf
+        
+    # show the model parameters used by the model:    
+    print("\nUsed model parameters : ",model.get_params())
+
+    # fit the model:
+    model.fit(X_train, y_train )
+
+    # save the trained model 
+    pickle.dump(model, open(file_name_trained_model, "wb"))
+
+    return  model
+
+
+
+def train_gbm_model(df1_train, c, x_vars_plus, model_type = 'lgbm', output_folder_model ='', LOAD = 0):
+    """function to tune and train the model"""
+
+    if 1:
+        print('\n'+'-'*100)
+        print('GBM for '+c+'\n')
+
+
+    # get file name of the trained model:
+    file_name_trained_model = output_folder_model + model_type+'_'+c+'_gbm_model.pkl'
+
+    # check if trained model already exists:
+    if (os.path.isfile(file_name_trained_model)) and LOAD:
+        # load the trained model:        
+        #model  = keras.models.load_model(folder_name_trained_model)        
+        model = pickle.load(open(file_name_trained_model, "rb"))
+
+        return model 
+    
+    # select the data for c:
+    df1_train_c = df1_train.loc[df1_train.index.get_level_values('CCY')==c,['y_var']+x_vars_plus]
+
+    ## get y and X train
+    y_train = df1_train_c['y_var'].droplevel('CCY')
+    X_train = df1_train_c[x_vars_plus]
+  
+        
+    # create the lgb data sets:
+    dtrain = lgb.Dataset(X_train, label=y_train)
+
+
+    # initialize optional weights and arguments for the fitting process:
+    fit_args = {}
+
+    params = {
+        "objective": "regression",
+        "metric": "root_mean_squared_error",
+        "verbosity": -1,
+        "boosting_type": "gbdt",
+    }
+    # Hyperparameter tuner for LightGBM using cross-validation.
+    # It optimizes the following hyper-parameters in a stepwise manner: 
+    # lambda_l1, lambda_l2, num_leaves, feature_fraction, bagging_fraction, bagging_freq and min_child_samples.
+    tuner = lgb.LightGBMTunerCV(
+        params,
+        dtrain,
+        folds=KFold(n_splits=10),
+        callbacks=[early_stopping(50), log_evaluation(50)],
+        optuna_seed =42,
+    )
+
+    print("\nTuning hyper-parameters ..")
+    tuner.run()
+
+    best_params = tuner.best_params
+    print("\nTuned hyper-parameters :(best score)     ",tuner.best_score)
+    print("\nTuned hyper-parameters :(best parameters) ",best_params)  
+    print("  : ")
+    for key, value in best_params.items():
+        print("    {}: {}".format(key, value))
+
+      
+    # get the final model
+    model = LGBMRegressor( random_state=42, **tuner.lgbm_params)
+    # fit the model:
+    model.fit(X_train, y_train )
+
+    # save the trained model 
+    pickle.dump(model, open(file_name_trained_model, "wb"))
+
+    return  model
 
 
 
@@ -308,121 +499,6 @@ def get_lstm(df1_train, df1_test, x_vars_plus, x_vars, c = '_Total_', PRINT = 1,
         testPredict  = np.exp(testPredict)  - 1
 
     return  {'trainPredict':trainPredict, 'testPredict':testPredict, 'y_train':y_train, 'y_test':y_test}
-
-
-
-def train_model(df1_train, c, x_vars_plus, model_type = 'tweedie', TUNE = True, output_folder_model ='', LOAD = 0, X_val = None, y_val = None, LOG_TRANSFORM = 0):
-    """function to tune and train the model"""
-
-    if 1:
-        print('\n'+'-'*100)
-        print('GBM for '+c+'\n')
-
-    df1_train_c = df1_train.loc[df1_train.index.get_level_values('CCY')==c,['y_var']+x_vars_plus]
-
-    ## get y and X train
-    y_train = df1_train_c['y_var'].droplevel('CCY')
-
-    ## get y and X train
-    if LOG_TRANSFORM:
-        y_train = np.log(y_train+1)    
-
-    X_train = df1_train_c[x_vars_plus]
-
-    # get file name of the trained model:
-    file_name_trained_model = output_folder_model + model_type+'_'+c+'_model.pkl'
-
-    # check if trained model already exists:
-    if (os.path.isfile(file_name_trained_model)) and LOAD:
-        # load the trained model:        
-        #model  = keras.models.load_model(folder_name_trained_model)        
-        model = pickle.load(open(file_name_trained_model, "rb"))
-
-        return model 
-
-    # initialize optional weights and arguments for the fitting process:
-    fit_args = {}
-
-    # Use an LGBM or RF ML model:    
-    if model_type in ['lgbm','rf','lgbm_tw']:    
-        n_estimators = 50     
-        params = {'subsample': 0.5, 'num_leaves': 30, 'max_depth': 10, 'learning_rate': 0.3} #'boosting_type' : 'dart'}
-        if model_type == 'rf':
-                params =  {'num_leaves': 20, 'max_depth': 5, 'feature_fraction' : 0.8, 'learning_rate': 1, 'boosting_type' : 'rf', 'bagging_freq' : 1, 'subsample_freq' : 1} 
-                # {'subsample': 0.5, 'num_leaves': 31, 'max_depth': 5, 'learning_rate': 0.01}                
-        if model_type == 'lgbm_tw':
-                params =  params  | {'objective': 'tweedie', 'metric': 'tweedie'}     
-
-        clf = LGBMRegressor( random_state=42, n_estimators = n_estimators, **params)
-        
-        tuning_dict = { 
-                                'max_depth': [3, 5, 10,  -1], #'max_depth': [3, 5, 15, 20, 30],
-                                'num_leaves': [2, 5, 10, 20, ], #'num_leaves': [5, 10, 20, 30],
-                                #'subsample': [0.3, 0.5, 1] #'subsample': [0.1, 0.2, 0.8, 1]                  
-            }
-        if model_type in ['lgbm','lgbm_tw']:
-            tuning_dict = tuning_dict | {'learning_rate': [0.05, 0.1, 0.2, 0.3, 0.4], # 'learning_rate': [0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5],
-                                         'subsample_freq' : [1],
-                                         } 
-        if model_type in ['rf']:
-            tuning_dict = tuning_dict | {'feature_fraction' : [0.1, 0.2, 0.5, 0.8, 1]   }
-        if model_type in ['lgbm_tw']:
-            tuning_dict = tuning_dict | { 'tweedie_variance_power': [ 1.1, 1.2, 1.5, 1.7, 1.8, 1.9],} # constraints: 1.0 <= tweedie_variance_power < 2.0,  see https://lightgbm.readthedocs.io/en/latest/Parameters.html
-        
-        fit_args = {'eval_metric' : ['neg_mean_absolute_error','neg_root_mean_squared_error'], 
-               }  
-        if not ((X_val is None) or (y_val is None)) :
-            fit_args = fit_args | {'callbacks': [ log_evaluation(n_estimators), early_stopping(2)],
-                    'eval_set' : [[X_val, y_val]], }
-        
-    # Use a tweedie GLM model:    
-    if model_type in ['tweedie']:
-        params =  {'power': 1.2, 'alpha': 0.1} # {'power': 0.5, 'alpha': 0.05} # {'power': 1.9, 'alpha': 0.1} # link ='auto'
-
-        clf = TweedieRegressor( **params, solver='newton-cholesky')
-
-        
-        tuning_dict = { 
-                     'power': [0, 1.1, 1.2, 1.5, 1.7, 1.9, 2, 2.5, 3], 
-                     'alpha': [0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 1, 2, 3]               
-            }
-
-
-    #create, train and do inference of the model
-    if TUNE:
-        # Tune hyper-parameters and final model using cv cross-validation with n_iter parameter settings sampled from random search. Random search can cover a larger area of the parameter space with the same number of consider setting compared to e.g. grid search.
-        rs = RandomizedSearchCV(clf, tuning_dict, 
-            scoring= {'MAE': make_scorer(metrics.mean_absolute_error), 'RMSE':  make_scorer(metrics.mean_squared_error)}, #'f1', 'balanced_accuracy' Overview of scoring parameters: https://scikit-learn.org/stable/modules/model_evaluation.html#scoring-parameter
-                                # default: accuracy_score for classification and sklearn.metrics.r2_score for regression
-            refit= 'MAE',
-            cv=10, 
-            return_train_score=False, 
-            n_iter = 50,
-            verbose = False,
-            random_state = 888
-           
-        )
-        print("\nTuning hyper-parameters ..")
-        rs.fit(X_train, y_train , **fit_args)    
-        
-        print("\nTuned hyper-parameters :(best score)     ",rs.best_score_)
-        print("\nTuned hyper-parameters :(best parameters) ",rs.best_params_)
-        
-        model = clf
-        clf.set_params(**rs.best_params_)
-    else:
-        model = clf
-        
-    # show the model parameters used by the model:    
-    print("\nUsed model parameters : ",model.get_params())
-
-    # fit the model:
-    model.fit(X_train, y_train )
-
-    # save the trained model 
-    pickle.dump(model, open(file_name_trained_model, "wb"))
-
-    return  model
 
 
 
@@ -607,7 +683,7 @@ def get_error_stats_out(df1_test, smodels,  res_stats_out, x_vars, horizon, c = 
 
 
 
-def get_model_comparison(model_objects_train, model_objects_test, model_names = ['SARIMA', 'GBM', 'LSTM'], target_metric = 'Root mean squared error'):
+def get_model_comparison(model_objects_train, model_objects_test, model_names = ['SARIMA', 'GBM (flexible)', 'GBM (strict)', 'LSTM'], target_metric = 'Root mean squared error'):
     
     n_models = len(model_objects_train)
 
