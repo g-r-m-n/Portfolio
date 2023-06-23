@@ -81,7 +81,7 @@ def plot_descriptives_per_moth(df):
     ratios_CCY['Earnings'].plot(ax=axes[0])
     axes[0].set_title('Earnings = Revenue + Interests')
     axes[0].tick_params('x', labelrotation=45)
-    ratios_CCY['Costs'].plot(ax=axes[1])
+    (-ratios_CCY['Costs']).plot(ax=axes[1])
     axes[1].set_title('Costs')
     axes[1].tick_params('x', labelrotation=45)
     plt.show()
@@ -89,7 +89,7 @@ def plot_descriptives_per_moth(df):
     plt.rcParams.update({'figure.figsize':(24,7)})
     fig, axes = plt.subplots(1, 2, sharex=False)
     ratios_CCY['Profit'].plot(ax=axes[0])
-    axes[0].set_title('Profit')
+    axes[0].set_title('Profit = Earnings - Costs')
     axes[0].tick_params('x', labelrotation=45)
     ratios_CCY['Earnings_to_Costs'].plot(ax=axes[1])
     axes[1].set_title('Earnings_to_Costs')
@@ -115,7 +115,7 @@ def get_arima(df1_train, smodels, x_vars, c = '_Total_', PRINT = 1, LOAD = 1, PL
         smodel = pickle.load(open(file_name_trained_model, "rb"))
     else:
         y_train = df1_train.loc[df1_train.index.get_level_values('CCY')==c,'y_var'].droplevel('CCY')
-        X_train = df1_train.loc[df1_train.index.get_level_values('CCY')==c,x_vars].droplevel('CCY')
+        X_train = df1_train.loc[df1_train.index.get_level_values('CCY')==c, x_vars].droplevel('CCY')
 
         # Setup the auto-ARIMA model
         smodel = pm.arima.AutoARIMA(start_p=1, start_q=1,            
@@ -161,7 +161,7 @@ def add_lagged(df1, x_vars, lag = 1):
 
 
 
-def get_lstm(df1_train, df1_test, x_vars_plus, x_vars, c = '_Total_', PRINT = 1, LOAD = 1,  output_folder_model = '', MODEL_TYPE= 'LSTM', UNITS = 16, LOG_TRANSFORM = 0,    look_back = 1, SCALE ='normalize', MAX_EPOCHS = 100):
+def get_lstm(df1_train, df1_test, x_vars_plus, x_vars, c = '_Total_', PRINT = 1, LOAD = 1,  output_folder_model = '', MODEL_TYPE= 'LSTM', UNITS = 4, LOG_TRANSFORM = 0,    look_back = 1, SCALE ='normalize', MAX_EPOCHS = 100):
     """Run the LSTM model
         LSTM RNN stands for Long Short-Term Memory recurrent neural network 
         LSTM networks use memory blocks - instead of neurons - connected through layers.
@@ -253,10 +253,10 @@ def get_lstm(df1_train, df1_test, x_vars_plus, x_vars, c = '_Total_', PRINT = 1,
         lstm_model = Sequential()
         input_shape=( look_back, len(x_vars)+1)
         if MODEL_TYPE== 'LSTM':
-            lstm_model.add(LSTM(units = UNITS, input_shape=input_shape)) 
+            lstm_model.add(LSTM(units = UNITS, input_shape=input_shape, dropout = 0.1, recurrent_dropout = 0.1))
             lstm_model.add(Dense(units = len(x_vars)) )             
         if MODEL_TYPE== 'RNN':
-            lstm_model.add(SimpleRNN(units = UNITS, input_shape = input_shape)) # , dropout = 0.1, recurrent_dropout = 0.1))
+            lstm_model.add(SimpleRNN(units = UNITS, input_shape = input_shape, dropout = 0.1, recurrent_dropout = 0.1)) 
             lstm_model.add(Dense(units = len(x_vars)) ) 
         if MODEL_TYPE== 'LINEAR':
             lstm_model.add(Flatten())  
@@ -283,7 +283,7 @@ def get_lstm(df1_train, df1_test, x_vars_plus, x_vars, c = '_Total_', PRINT = 1,
             print('\nStart training ...\n')
 
         # The network is trained a number of epochs, and a batch size of 1 is used.
-        lstm_model.fit(X_train_s, y_train_s,   epochs=MAX_EPOCHS, batch_size=1, verbose=2, callbacks=[callback])# , validation_split=0.2)
+        lstm_model.fit(X_train_s, y_train_s,   epochs=MAX_EPOCHS, batch_size=1, verbose=2, callbacks=[callback] , validation_split=0.1)
 
         # save the trained model
         lstm_model.save(folder_name_trained_model)
@@ -330,7 +330,7 @@ def train_model(df1_train, c, x_vars_plus, model_type = 'tweedie', TUNE = True, 
     X_train = df1_train_c[x_vars_plus]
 
     # get file name of the trained model:
-    file_name_trained_model = output_folder_model + model_type+ '_model.pkl'
+    file_name_trained_model = output_folder_model + model_type+'_'+c+'_model.pkl'
 
     # check if trained model already exists:
     if (os.path.isfile(file_name_trained_model)) and LOAD:
@@ -344,24 +344,26 @@ def train_model(df1_train, c, x_vars_plus, model_type = 'tweedie', TUNE = True, 
     fit_args = {}
 
     # Use an LGBM or RF ML model:    
-    if model_type in ['lgbm','rf','lgbm_tw']:
-        n_estimators = 50 
+    if model_type in ['lgbm','rf','lgbm_tw']:    
+        n_estimators = 50     
         params = {'subsample': 0.5, 'num_leaves': 30, 'max_depth': 10, 'learning_rate': 0.3} #'boosting_type' : 'dart'}
         if model_type == 'rf':
-                params =  {'num_leaves': 20, 'max_depth': 5, 'feature_fraction' : 0.8, 'learning_rate': 1, 'boosting_type' : 'rf', 'bagging_freq' : 1, 'subsample_freq' : 1, 'bagging_fraction' : 0.8 } 
+                params =  {'num_leaves': 20, 'max_depth': 5, 'feature_fraction' : 0.8, 'learning_rate': 1, 'boosting_type' : 'rf', 'bagging_freq' : 1, 'subsample_freq' : 1} 
                 # {'subsample': 0.5, 'num_leaves': 31, 'max_depth': 5, 'learning_rate': 0.01}                
         if model_type == 'lgbm_tw':
                 params =  params  | {'objective': 'tweedie', 'metric': 'tweedie'}     
 
-        clf = LGBMRegressor( random_state=42, n_estimators=n_estimators, **params)
+        clf = LGBMRegressor( random_state=42, n_estimators = n_estimators, **params)
         
         tuning_dict = { 
-                                'max_depth': [3,  10, 15, -1], #'max_depth': [3, 5, 15, 20, 30],
-                                'num_leaves': [5,  20, 30, 40], #'num_leaves': [5, 10, 20, 30],
+                                'max_depth': [3, 5, 10,  -1], #'max_depth': [3, 5, 15, 20, 30],
+                                'num_leaves': [2, 5, 10, 20, ], #'num_leaves': [5, 10, 20, 30],
                                 #'subsample': [0.3, 0.5, 1] #'subsample': [0.1, 0.2, 0.8, 1]                  
             }
         if model_type in ['lgbm','lgbm_tw']:
-            tuning_dict = tuning_dict | {'learning_rate': [0.05, 0.1, 0.2, 0.3, 0.4],} # 'learning_rate': [0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5],
+            tuning_dict = tuning_dict | {'learning_rate': [0.05, 0.1, 0.2, 0.3, 0.4], # 'learning_rate': [0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5],
+                                         'subsample_freq' : [1],
+                                         } 
         if model_type in ['rf']:
             tuning_dict = tuning_dict | {'feature_fraction' : [0.1, 0.2, 0.5, 0.8, 1]   }
         if model_type in ['lgbm_tw']:
@@ -605,9 +607,9 @@ def get_error_stats_out(df1_test, smodels,  res_stats_out, x_vars, horizon, c = 
 
 
 
-def get_model_comparison(model_objects_train = (res_stats_in, res_stats_in_gbm, res_stats_in_rnn),model_objects_test = (res_stats_out, res_stats_out_gbm, res_stats_out_rnn), model_names   = ['SARIMA', 'GBM', 'LSTM'], target_metric = 'Root mean squared error'):
+def get_model_comparison(model_objects_train, model_objects_test, model_names = ['SARIMA', 'GBM', 'LSTM'], target_metric = 'Root mean squared error'):
     
-    n_models = len(model_objects)
+    n_models = len(model_objects_train)
 
     df_res = pd.DataFrame()
     for i in range(n_models):
@@ -617,7 +619,7 @@ def get_model_comparison(model_objects_train = (res_stats_in, res_stats_in_gbm, 
         df_i['Model'] = model_names[i]
         df_i.set_index(['Model',df_i.index],inplace=True)
         # append df_i to the result data frame
-        df_res = df_res.append(df_i)
+        df_res = pd.concat([df_res,df_i], axis = 0)
 
     # plot training performance:
     df_res['Train'].unstack(0).plot(kind='bar',title='In-sample performance of different models', ylabel=target_metric)
